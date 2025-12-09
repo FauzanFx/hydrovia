@@ -1,0 +1,358 @@
+[
+    {
+        "id": "444055e07ab080bb",
+        "type": "tab",
+        "label": "Hydrovia - Final",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "b6247210cb61c31f",
+        "type": "mqtt in",
+        "z": "444055e07ab080bb",
+        "name": "hydrovia/alerts/sensordata",
+        "topic": "hydrovia/alerts/sensordata",
+        "qos": "2",
+        "datatype": "utf8",
+        "broker": "3710d225cac256b9",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 100,
+        "wires": [
+            [
+                "2edfedfab58ce653"
+            ]
+        ]
+    },
+    {
+        "id": "2edfedfab58ce653",
+        "type": "json",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 370,
+        "y": 100,
+        "wires": [
+            [
+                "48c1b880338f35bb",
+                "682aa33ca73dc493",
+                "e76b05f81d0249a7"
+            ]
+        ]
+    },
+    {
+        "id": "a4a96578def7f64c",
+        "type": "mqtt out",
+        "z": "444055e07ab080bb",
+        "name": "hydrovia/control/lock",
+        "topic": "hydrovia/control/lock",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "3710d225cac256b9",
+        "x": 1660,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "48c1b880338f35bb",
+        "type": "debug",
+        "z": "444055e07ab080bb",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 630,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "e76b05f81d0249a7",
+        "type": "change",
+        "z": "444055e07ab080bb",
+        "name": "change gauge",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "payload.total_volume1_l",
+                "tot": "msg"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 440,
+        "y": 360,
+        "wires": [
+            [
+                "620bbe8d153a6316"
+            ]
+        ]
+    },
+    {
+        "id": "682aa33ca73dc493",
+        "type": "function",
+        "z": "444055e07ab080bb",
+        "name": "OTAK UTAMA (Level, Bocor, Manual)",
+        "func": "/*\n=====================================================\nKODE FUNGSI OTAK UTAMA (SELISIH VOLUME + MANUAL RESET)\n=====================================================\n*/\n\n// --- KONFIGURASI ---\nconst LEVEL_EMPTY = 10;     // Mulai isi jika > 30cm (jarak sensor)\nconst LEVEL_FULL = 5;      // Stop isi jika < 10cm\nconst GRACE_PERIOD = 5000;  // Masa tenggang 5 detik\n\n// Konfigurasi Kebocoran (Metode Selisih Volume)\nconst MAX_DIFF_LIMIT = 0.75;  // BATAS AMAN: Maksimal selisih 1.0 Liter\nconst MIN_VOLUME_CHECK = 0.5; // Mulai cek setelah 0.5 Liter air lewat\n// -------------------\n\n// Variabel Memori\nlet state = flow.get(\"system_state\") || \"IDLE\";\nlet manualLock = flow.get(\"manual_lock\") || false;\n\n// Pesan Output Default\nlet valveMsg = null;\nlet lockMsg = null;\nlet statusMsg = { payload: state };\n\n// === BAGIAN 1: INPUT DARI TOMBOL MANUAL ===\nif (typeof msg.payload === 'boolean' || msg.payload === \"true\" || msg.payload === \"false\") {\n    manualLock = (msg.payload === \"true\" || msg.payload === true);\n    flow.set(\"manual_lock\", manualLock);\n\n    if (manualLock) {\n        state = \"LOCKED\";\n        valveMsg = { payload: \"CLOSE\" };\n        lockMsg = { payload: \"true\" };\n        statusMsg.payload = \"Sistem Dikunci Manual (Valve Mati).\";\n    } else {\n        state = \"IDLE\";\n        lockMsg = { payload: \"false\" };\n        statusMsg.payload = \"Manual Lock Dibuka. Menunggu sensor...\";\n    }\n    flow.set(\"system_state\", state);\n\n// === BAGIAN 2: INPUT DARI SENSOR ESP32 ===\n} else if (msg.payload && typeof msg.payload === 'object') {\n    let data = msg.payload;\n    let level = data.level_cm;\n    let vol1 = data.total_volume1_l || 0;\n    let vol2 = data.total_volume2_l || 0;\n    let sensorValid = (level > 0);\n\n    if (manualLock) {\n        statusMsg.payload = \"Sistem Dikunci Manual.\";\n        return [null, null, statusMsg];\n    }\n\n    switch (state) {\n        case \"IDLE\":\n            statusMsg.payload = \"Standby (Level: \" + level + \"cm)\";\n            if (sensorValid && level > LEVEL_EMPTY) {\n                valveMsg = { payload: \"OPEN\" };\n                statusMsg.payload = \"Air Kurang! Memulai Pengisian...\";\n                flow.set(\"system_state\", \"PRIMING\");\n\n                setTimeout(() => {\n                    if (flow.get(\"system_state\") === \"PRIMING\") {\n                        flow.set(\"system_state\", \"MONITORING\");\n                    }\n                }, GRACE_PERIOD);\n            }\n            break;\n\n        case \"PRIMING\":\n            statusMsg.payload = \"Masa Tenggang (Mengisi...)\";\n            if (sensorValid && level < LEVEL_FULL) {\n                valveMsg = { payload: \"CLOSE\" };\n                statusMsg.payload = \"Penuh. Selesai.\";\n                flow.set(\"system_state\", \"IDLE\");\n            }\n            break;\n\n        case \"MONITORING\":\n            // --- LOGIKA BARU: HITUNG SELISIH ---\n            // Menghitung berapa liter air yang hilang di jalan\n            // Rumus: Input (Vol1) - Output (Vol2)\n            let selisih = vol1 - vol2; \n            \n            statusMsg.payload = `Mengisi... (Selisih: ${selisih.toFixed(2)} L)`;\n\n            // Cek Kebocoran (Hanya jika volume > 0.5L agar pembacaan stabil)\n            if (vol1 > MIN_VOLUME_CHECK) {\n                // Jika selisih melebihi batas aman (misal > 1 Liter)\n                if (selisih > MAX_DIFF_LIMIT) {\n                    statusMsg.payload = `BAHAYA: Bocor! Selisih ${selisih.toFixed(2)}L melebihi batas ${MAX_DIFF_LIMIT}L`;\n\n                    valveMsg = { payload: \"CLOSE\" };\n                    lockMsg = { payload: \"true\" };\n                    state = \"LOCKED\";\n                    flow.set(\"system_state\", state);\n                    flow.set(\"manual_lock\", true);\n                }\n            }\n\n            // Cek Penuh Normal\n            if (sensorValid && level < LEVEL_FULL) {\n                valveMsg = { payload: \"CLOSE\" };\n                statusMsg.payload = \"Tangki Penuh. Pengisian Selesai.\";\n                flow.set(\"system_state\", \"IDLE\");\n            }\n            break;\n\n        case \"LOCKED\":\n            statusMsg.payload = \"TERKUNCI. Reset tombol untuk mulai.\";\n            break;\n    }\n}\n\nreturn [valveMsg, lockMsg, statusMsg];",
+        "outputs": 3,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 710,
+        "y": 120,
+        "wires": [
+            [
+                "9bcf3b41549bb729"
+            ],
+            [
+                "a4a96578def7f64c",
+                "674940657c820d6a"
+            ],
+            [
+                "385480ec8d5f3916"
+            ]
+        ]
+    },
+    {
+        "id": "9bcf3b41549bb729",
+        "type": "mqtt out",
+        "z": "444055e07ab080bb",
+        "name": "hydrovia/control/valve",
+        "topic": "hydrovia/control/valve",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "3710d225cac256b9",
+        "x": 1180,
+        "y": 20,
+        "wires": []
+    },
+    {
+        "id": "bcf4ad479ede0177",
+        "type": "mqtt out",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "topic": "hydrovia/control/reset",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "3710d225cac256b9",
+        "x": 1720,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "620bbe8d153a6316",
+        "type": "change",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "rules": [
+            {
+                "t": "set",
+                "p": "topic",
+                "pt": "msg",
+                "to": "volume",
+                "tot": "str"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 730,
+        "y": 360,
+        "wires": [
+            [
+                "fa4aee2adbacbd28"
+            ]
+        ]
+    },
+    {
+        "id": "385480ec8d5f3916",
+        "type": "change",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "rules": [
+            {
+                "t": "set",
+                "p": "topic",
+                "pt": "msg",
+                "to": "status",
+                "tot": "str"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 930,
+        "y": 300,
+        "wires": [
+            [
+                "fa4aee2adbacbd28"
+            ]
+        ]
+    },
+    {
+        "id": "66ca1d8c1ca3bf2b",
+        "type": "switch",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "property": "topic",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "perintah_lock",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "perintah_reset",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 1450,
+        "y": 340,
+        "wires": [
+            [
+                "682aa33ca73dc493"
+            ],
+            [
+                "bcf4ad479ede0177"
+            ]
+        ]
+    },
+    {
+        "id": "674940657c820d6a",
+        "type": "change",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "rules": [
+            {
+                "t": "set",
+                "p": "topic",
+                "pt": "msg",
+                "to": "lock_remote",
+                "tot": "str"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 1030,
+        "y": 180,
+        "wires": [
+            [
+                "fa4aee2adbacbd28"
+            ]
+        ]
+    },
+    {
+        "id": "fa4aee2adbacbd28",
+        "type": "uibuilder",
+        "z": "444055e07ab080bb",
+        "name": "",
+        "topic": "",
+        "url": "hydrovia",
+        "okToGo": true,
+        "fwdInMessages": false,
+        "allowScripts": false,
+        "allowStyles": false,
+        "copyIndex": true,
+        "templateFolder": "blank",
+        "extTemplate": "",
+        "showfolder": false,
+        "reload": true,
+        "sourceFolder": "src",
+        "deployedVersion": "7.5.0",
+        "showMsgUib": false,
+        "title": "",
+        "descr": "",
+        "editurl": "",
+        "x": 1190,
+        "y": 360,
+        "wires": [
+            [
+                "66ca1d8c1ca3bf2b"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "3710d225cac256b9",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "localhost",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "96283459f1bb4765",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-uibuilder": "7.5.0"
+        }
+    }
+]
